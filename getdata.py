@@ -1,7 +1,7 @@
 # getdata.py
 """
 Модуль для получения и расшифровки данных отслеживания track24.ru.
-Использует cloudscraper для обхода защиты Cloudflare.
+Обходит Cloudflare с помощью извлечения cf_token и установки cookie.
 """
 
 import sys
@@ -21,7 +21,6 @@ from Crypto.Util.Padding import unpad
 
 BASE_URL = "https://track24.ru"
 AJAX_PATH = "/ajax/c9bad3a632982e4e315b3ef3d6567e23.ajax.php"
-DEBUG_JS_FILE = "page_js_dump.txt"
 
 
 def evp_kdf(passphrase: str, salt: bytes, key_size=32, iv_size=16) -> tuple:
@@ -72,14 +71,6 @@ def decode_js_escapes(s: str) -> str:
     return re.sub(r'\\x([0-9a-fA-F]{2})', lambda m: chr(int(m.group(1), 16)), s)
 
 
-def _fetch_tracking_page(tracking_code: str, session) -> str:
-    resp = session.get(BASE_URL + "/", params={"code": tracking_code})
-    resp.raise_for_status()
-    soup = BeautifulSoup(resp.text, "html.parser")
-    scripts = soup.find_all("script")
-    return "\n".join(script.string for script in scripts if script.string)
-
-
 def _extract_parameters(js_text: str, html_text: str = "") -> dict:
     params = {}
     for name in ["trackingKey", "clientIp", "uuid", "cp"]:
@@ -101,6 +92,31 @@ def _extract_parameters(js_text: str, html_text: str = "") -> dict:
     }
 
 
+def _bypass_cloudflare(session) -> None:
+    """
+    Пытаемся обойти Cloudflare, подставив cf_token.
+    Если страница содержит cf_token, извлекаем его, ставим куку и перезагружаем.
+    """
+    # Делаем первый запрос к главной, чтобы проверить, не заглушка ли это
+    resp = session.get(BASE_URL + "/", params={"code": "123"})  # можно любой код, просто чтобы проверить
+    text = resp.text
+    if 'cf_token=' in text:
+        # Извлекаем токен из скрипта
+        match = re.search(r'cf_token=([0-9]+:[a-f0-9]+)', text)
+        if match:
+            token = match.group(1)
+            print(f"Cloudflare token получен: {token}")
+            # Устанавливаем cookie для домена track24.ru
+            session.cookies.set("cf_token", token, domain="track24.ru", path="/")
+            # Можно также установить cf_test=1
+            session.cookies.set("cf_test", "1", domain="track24.ru", path="/")
+            # После установки кук делаем ещё один запрос, чтобы убедиться, что пустило
+            resp2 = session.get(BASE_URL + "/", params={"code": "123"})
+            print("После установки cookie статус:", resp2.status_code)
+        else:
+            print("Не удалось извлечь cf_token из страницы")
+
+
 def fetch_tracking_info(tracking_code: str) -> Optional[Dict]:
     session = cloudscraper.create_scraper()
     session.headers.update({
@@ -111,7 +127,13 @@ def fetch_tracking_info(tracking_code: str) -> Optional[Dict]:
         "Accept-Language": "en-US,en;q=0.9",
     })
 
-    # 1. Загружаем страницу и получаем JS
+    # Пытаемся обойти Cloudflare до основного запроса
+    try:
+        _bypass_cloudflare(session)
+    except Exception as e:
+        print(f"Ошибка при обходе Cloudflare: {e}", file=sys.stderr)
+
+    # Основной запрос страницы трекинга
     resp = session.get(BASE_URL + "/", params={"code": tracking_code})
     resp.raise_for_status()
     html_text = resp.text
@@ -121,16 +143,15 @@ def fetch_tracking_info(tracking_code: str) -> Optional[Dict]:
 
     # Сохраняем JS для диагностики
     try:
-        with open(DEBUG_JS_FILE, "w", encoding="utf-8") as f:
+        with open("page_js_dump.txt", "w", encoding="utf-8") as f:
             f.write(js_text)
     except Exception:
         pass
 
-    # 2. Параметры
     params = _extract_parameters(js_text, html_text)
 
     if not params["tracking_key"] or not params["client_ip"]:
-        print("⚠️ Не удалось найти trackingKey или clientIp. Фрагменты JS и HTML:", file=sys.stderr)
+        print("⚠️ Не удалось найти trackingKey или clientIp. Вывожу фрагменты JS и HTML:", file=sys.stderr)
         print("--- JS (первые 2000) ---", file=sys.stderr)
         print(js_text[:2000], file=sys.stderr)
         print("--- HTML (первые 2000) ---", file=sys.stderr)
@@ -146,7 +167,7 @@ def fetch_tracking_info(tracking_code: str) -> Optional[Dict]:
         print("Ошибка: не удалось извлечь ключ cp", file=sys.stderr)
         return None
 
-    # 3. AJAX-запрос
+    # AJAX-запрос к API за зашифрованными данными
     payload = {
         "code": tracking_code,
         "selectedService": "",
@@ -177,11 +198,11 @@ def fetch_tracking_info(tracking_code: str) -> Optional[Dict]:
         resp.raise_for_status()
         encrypted = resp.json()
     except Exception as e:
-        print(f"Ошибка API: {e}", file=sys.stderr)
+        print(f"Ошибка при запросе к API: {e}", file=sys.stderr)
         return None
 
     if "ct" not in encrypted:
-        print("Ответ без ct", file=sys.stderr)
+        print("Ответ не содержит зашифрованных данных", file=sys.stderr)
         return None
 
     try:
