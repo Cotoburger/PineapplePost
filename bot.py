@@ -17,7 +17,7 @@ from Crypto.Util.Padding import pad, unpad
 # Впишите сюда ваш секрет шифрования (любая строка).
 # Если оставить None, бот возьмёт секрет из ENCRYPTION_SECRET.
 # ------------------------------------------------------------
-DEBUG_ENCRYPTION_SECRET = "Sjddr9NFUfRI]bHCPw=g4Ad>O%h<,oIo3z##04]=EVbLfJdjRC$mO1kVK4=1l7P+ic?s@{*30v]=*2Ms1IH:U,"
+DEBUG_ENCRYPTION_SECRET = None
 
 # ------------------------------------------------------------
 SUBSCRIPTIONS_FILE = "subscriptions.json"
