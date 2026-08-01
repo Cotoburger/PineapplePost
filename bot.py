@@ -244,8 +244,18 @@ def format_status(data: dict) -> str:
     return "\n".join(lines)
 
 def compute_state_hash(data: dict) -> str:
+    events = data["data"]["events"]
+    # Сортируем для стабильного порядка
+    try:
+        events_sorted = sorted(
+            events,
+            key=lambda e: datetime.strptime(e["operationDateTime"], "%d.%m.%Y %H:%M:%S"),
+            reverse=True,
+        )
+    except Exception:
+        events_sorted = events
     relevant = {
-        "events": data["data"]["events"],
+        "events": events_sorted,
         "lastPoint": data["data"]["lastPoint"],
     }
     raw = json.dumps(relevant, sort_keys=True, ensure_ascii=False)
