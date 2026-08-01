@@ -12,18 +12,15 @@ from getdata import fetch_tracking_info
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
 
-# ------------------------------------------------------------
-# 🔧 ДЛЯ ЛОКАЛЬНОЙ ОТЛАДКИ
-# Впишите сюда ваш секрет шифрования (любая строка).
-# Если оставить None, бот возьмёт секрет из ENCRYPTION_SECRET.
-# ------------------------------------------------------------
+
 DEBUG_ENCRYPTION_SECRET = None
 
-# ------------------------------------------------------------
+
+
+
 SUBSCRIPTIONS_FILE = "subscriptions.json"
 OFFSET_FILE = "last_update_id.txt"
 
-# ── Получение токена ──────────────────────────────────────
 def get_token() -> str:
     parser = argparse.ArgumentParser()
     parser.add_argument("--token", help="Токен Telegram бота")
@@ -40,8 +37,6 @@ def get_token() -> str:
 TOKEN = get_token()
 API_URL = f"https://api.telegram.org/bot{TOKEN}"
 
-# ── Получение секрета шифрования ─────────────────────────
-# Приоритет: ENCRYPTION_SECRET (окружение) → DEBUG_ENCRYPTION_SECRET (код) → без шифрования
 env_secret = os.environ.get("ENCRYPTION_SECRET")
 if env_secret:
     ENCRYPTION_SECRET = env_secret
