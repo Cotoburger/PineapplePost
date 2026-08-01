@@ -11,6 +11,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: true  # чтобы git мог пушить
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -24,3 +26,12 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         run: python bot.py
+
+      - name: Commit and push state files
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add subscriptions.json last_update_id.txt
+          git diff --staged --quiet || git commit -m "Update tracking subscriptions and offset"
+          git pull --rebase origin HEAD  # на случай, если кто-то ещё запушил (при работе в одиночку не обязательно)
+          git push
