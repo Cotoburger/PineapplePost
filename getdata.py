@@ -18,7 +18,7 @@ from bs4 import BeautifulSoup
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import unpad
 
-
+DEBUG = os.environ.get("DEBUG", "false").lower() == "true"
 BASE_URL = "https://track24.ru"
 AJAX_PATH = "/ajax/c9bad3a632982e4e315b3ef3d6567e23.ajax.php"
 
@@ -105,14 +105,16 @@ def _bypass_cloudflare(session) -> None:
         match = re.search(r'cf_token=([0-9]+:[a-f0-9]+)', text)
         if match:
             token = match.group(1)
-            print(f"Cloudflare token получен: {token}")
+            if DEBUG:
+                print(f"Cloudflare token получен: {token}")
             # Устанавливаем cookie для домена track24.ru
             session.cookies.set("cf_token", token, domain="track24.ru", path="/")
             # Можно также установить cf_test=1
             session.cookies.set("cf_test", "1", domain="track24.ru", path="/")
             # После установки кук делаем ещё один запрос, чтобы убедиться, что пустило
             resp2 = session.get(BASE_URL + "/", params={"code": "123"})
-            print("После установки cookie статус:", resp2.status_code)
+            if DEBUG:
+                print("После установки cookie статус:", resp2.status_code)
         else:
             print("Не удалось извлечь cf_token из страницы")
 
@@ -159,7 +161,8 @@ def fetch_tracking_info(tracking_code: str) -> Optional[Dict]:
         print("--- Конец отладки ---", file=sys.stderr)
         return None
     else:
-        print(f"Параметры: trackingKey={params['tracking_key']}, clientIp={params['client_ip']}, uuid={params['uuid']}, password={'***' if params['password'] else 'None'}")
+        if DEBUG:
+            print(f"Параметры: trackingKey={params['tracking_key']}, clientIp={params['client_ip']}, uuid={params['uuid']}, password={'***' if params['password'] else 'None'}")
 
     uuid_val = params["uuid"] or str(_uuid.uuid4())
     password = params["password"]

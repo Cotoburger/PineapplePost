@@ -12,7 +12,6 @@ from getdata import fetch_tracking_info
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
 
-
 DEBUG_ENCRYPTION_SECRET = None
 
 
