@@ -1,7 +1,6 @@
 # getdata.py
 """
 Модуль для получения и расшифровки данных отслеживания track24.ru.
-Может использоваться как самостоятельный скрипт: python getdata.py TRACKCODE
 """
 
 import sys
@@ -18,10 +17,10 @@ from bs4 import BeautifulSoup
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import unpad
 
-
 # ── Константы ──────────────────────────────────────────────
 BASE_URL = "https://track24.ru"
 AJAX_PATH = "/ajax/c9bad3a632982e4e315b3ef3d6567e23.ajax.php"
+DEBUG_JS_FILE = "page_js_dump.txt"   # сюда сохраним JS для анализа
 
 # ── Вспомогательные функции ────────────────────────────────
 
@@ -53,15 +52,30 @@ def decrypt_response(encrypted_json: dict, password: str) -> dict:
 
 
 def extract_var(var_name: str, text: str) -> Optional[str]:
-    """Извлекает значение переменной из JavaScript-кода."""
-    # var/let/const name = "value"
-    pattern = rf'(?:var|let|const)\s+{var_name}\s*=\s*[\'"](.+?)[\'"]\s*;'
-    m = re.search(pattern, text)
-    if m:
-        return m.group(1)
-    # name = "value"
-    m = re.search(rf'{var_name}\s*=\s*[\'"](.+?)[\'"]\s*;', text)
-    return m.group(1) if m else None
+    """Извлекает значение переменной из JavaScript-кода (глобально)."""
+    # Паттерны: var/let/const name = "value" или name = "value"
+    patterns = [
+        rf'(?:var|let|const)\s+{var_name}\s*=\s*"(.*?)"\s*;',
+        rf'(?:var|let|const)\s+{var_name}\s*=\s*\'(.*?)\'\s*;',
+        rf'{var_name}\s*=\s*"(.*?)"\s*;',
+        rf'{var_name}\s*=\s*\'(.*?)\'\s*;',
+        # Иногда присваивание без кавычек (число/true/false) – для uuid бывает null
+        rf'{var_name}\s*=\s*([^;]+?)\s*;',  # общий случай, но осторожно
+    ]
+    for pat in patterns:
+        m = re.search(pat, text)
+        if m:
+            val = m.group(1)
+            # Убираем возможные пробелы/переводы строк
+            val = val.strip()
+            # Убираем обрамляющие кавычки (если остались)
+            if (val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'")):
+                val = val[1:-1]
+            # Если null/undefined – возвращаем None
+            if val in ("null", "undefined"):
+                return None
+            return val
+    return None
 
 
 def decode_js_escapes(s: str) -> str:
@@ -105,22 +119,38 @@ def fetch_tracking_info(tracking_code: str) -> Optional[Dict]:
         "Accept-Language": "en-US,en;q=0.9",
     })
 
-    # 1. Загружаем страницу и извлекаем параметры
+    # 1. Загружаем страницу
     js_text = _fetch_tracking_page(tracking_code, session)
+
+    # Сохраняем JS в файл для отладки
+    try:
+        with open(DEBUG_JS_FILE, "w", encoding="utf-8") as f:
+            f.write(js_text)
+        print(f"JS-код сохранён в {DEBUG_JS_FILE} (для диагностики)")
+    except:
+        pass
+
+    # 2. Извлекаем параметры
     params = _extract_parameters(js_text)
 
+    # Выводим в лог, что нашли
+    print(f"Параметры: trackingKey={params['tracking_key']}, clientIp={params['client_ip']}, uuid={params['uuid']}, password={'***' if params['password'] else 'None'}")
+
     if not params["tracking_key"] or not params["client_ip"]:
-        print("Ошибка: не удалось извлечь trackingKey или clientIp", file=sys.stderr)
+        # Попытка извлечь из атрибутов тегов или window.*
+        print("Не удалось извлечь через regex, пробую альтернативные методы...", file=sys.stderr)
+        # Возможно, они в объекте window. Попробуем поискать в HTML-комментариях или data-атрибутах
+        # Но скорее всего страница требует JavaScript-рендеринг. В GitHub Actions нет браузера.
         return None
 
-    # 2. Если нет uuid — генерируем
+    # 3. Генерируем uuid, если нет
     uuid_val = params["uuid"] or str(_uuid.uuid4())
     password = params["password"]
     if not password:
         print("Ошибка: не удалось извлечь ключ cp", file=sys.stderr)
         return None
 
-    # 3. AJAX-запрос
+    # 4. AJAX-запрос
     payload = {
         "code": tracking_code,
         "selectedService": "",
@@ -158,7 +188,7 @@ def fetch_tracking_info(tracking_code: str) -> Optional[Dict]:
         print("Ответ не содержит зашифрованных данных", file=sys.stderr)
         return None
 
-    # 4. Расшифровка
+    # 5. Расшифровка
     try:
         return decrypt_response(encrypted, password)
     except Exception as e:
