@@ -1,6 +1,7 @@
 # getdata.py
 """
 Модуль для получения и расшифровки данных отслеживания track24.ru.
+Может использоваться как самостоятельный скрипт: python getdata.py TRACKCODE
 """
 
 import sys
@@ -17,10 +18,11 @@ from bs4 import BeautifulSoup
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import unpad
 
+
 # ── Константы ──────────────────────────────────────────────
 BASE_URL = "https://track24.ru"
 AJAX_PATH = "/ajax/c9bad3a632982e4e315b3ef3d6567e23.ajax.php"
-DEBUG_JS_FILE = "page_js_dump.txt"   # сюда сохраним JS для анализа
+DEBUG_JS_FILE = "page_js_dump.txt"  # сюда сохраним JS для диагностики
 
 # ── Вспомогательные функции ────────────────────────────────
 
@@ -52,27 +54,25 @@ def decrypt_response(encrypted_json: dict, password: str) -> dict:
 
 
 def extract_var(var_name: str, text: str) -> Optional[str]:
-    """Извлекает значение переменной из JavaScript-кода (глобально)."""
-    # Паттерны: var/let/const name = "value" или name = "value"
+    """Извлекает значение переменной из JavaScript-кода."""
+    # Паттерны: var/let/const name = "value", name = "value" и т.п.
     patterns = [
         rf'(?:var|let|const)\s+{var_name}\s*=\s*"(.*?)"\s*;',
         rf'(?:var|let|const)\s+{var_name}\s*=\s*\'(.*?)\'\s*;',
         rf'{var_name}\s*=\s*"(.*?)"\s*;',
         rf'{var_name}\s*=\s*\'(.*?)\'\s*;',
-        # Иногда присваивание без кавычек (число/true/false) – для uuid бывает null
-        rf'{var_name}\s*=\s*([^;]+?)\s*;',  # общий случай, но осторожно
+        # Общий случай (без кавычек) — осторожно
+        rf'{var_name}\s*=\s*([^;]+?)\s*;',
     ]
     for pat in patterns:
         m = re.search(pat, text)
         if m:
-            val = m.group(1)
-            # Убираем возможные пробелы/переводы строк
-            val = val.strip()
-            # Убираем обрамляющие кавычки (если остались)
+            val = m.group(1).strip()
+            # Убираем возможные оставшиеся кавычки
             if (val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'")):
                 val = val[1:-1]
-            # Если null/undefined – возвращаем None
-            if val in ("null", "undefined"):
+            # Если null/undefined – считаем, что не найдено
+            if val in ("null", "undefined", ""):
                 return None
             return val
     return None
@@ -92,15 +92,29 @@ def _fetch_tracking_page(tracking_code: str, session: requests.Session) -> str:
     return "\n".join(script.string for script in scripts if script.string)
 
 
-def _extract_parameters(js_text: str) -> dict:
-    """Извлекает trackingKey, clientIp, uuid, cp из JS-кода."""
+def _extract_parameters(js_text: str, html_text: str = "") -> dict:
+    """Извлекает trackingKey, clientIp, uuid, cp из JS и HTML."""
     params = {}
-    params["tracking_key"] = extract_var("trackingKey", js_text)
-    params["client_ip"] = extract_var("clientIp", js_text)
-    params["uuid"] = extract_var("uuid", js_text)
-    cp_raw = extract_var("cp", js_text)
-    params["password"] = decode_js_escapes(cp_raw) if cp_raw else None
-    return params
+    # Сначала ищем в JS
+    for name in ["trackingKey", "clientIp", "uuid", "cp"]:
+        val = extract_var(name, js_text)
+        if not val and html_text:
+            # Попытка найти в HTML (data-атрибуты)
+            m = re.search(rf'data-{re.escape(name)}="([^"]+)"', html_text)
+            if m:
+                val = m.group(1)
+        params[name] = val
+
+    # Обрабатываем cp отдельно (может быть в \x-нотации)
+    cp_raw = params.get("cp")
+    password = decode_js_escapes(cp_raw) if cp_raw else None
+
+    return {
+        "tracking_key": params.get("trackingKey"),
+        "client_ip": params.get("clientIp"),
+        "uuid": params.get("uuid"),
+        "password": password,
+    }
 
 
 # ── Основная функция ──────────────────────────────────────
@@ -119,38 +133,47 @@ def fetch_tracking_info(tracking_code: str) -> Optional[Dict]:
         "Accept-Language": "en-US,en;q=0.9",
     })
 
-    # 1. Загружаем страницу
-    js_text = _fetch_tracking_page(tracking_code, session)
+    # 1. Загружаем страницу и получаем HTML/JS
+    resp = session.get(BASE_URL + "/", params={"code": tracking_code})
+    resp.raise_for_status()
+    html_text = resp.text
+    soup = BeautifulSoup(html_text, "html.parser")
+    scripts = soup.find_all("script")
+    js_text = "\n".join(script.string for script in scripts if script.string)
 
-    # Сохраняем JS в файл для отладки
+    # Сохраняем JS в файл для диагностики
     try:
         with open(DEBUG_JS_FILE, "w", encoding="utf-8") as f:
             f.write(js_text)
-        print(f"JS-код сохранён в {DEBUG_JS_FILE} (для диагностики)")
-    except:
+    except Exception:
         pass
 
     # 2. Извлекаем параметры
-    params = _extract_parameters(js_text)
+    params = _extract_parameters(js_text, html_text)
 
-    # Выводим в лог, что нашли
-    print(f"Параметры: trackingKey={params['tracking_key']}, clientIp={params['client_ip']}, uuid={params['uuid']}, password={'***' if params['password'] else 'None'}")
+    # Отладка: если не найдены ключевые параметры, выводим фрагменты в лог
+    if not params["tracking_key"] or not params["client_ip"]:
+        print("⚠️ Не удалось найти trackingKey или clientIp. Вывожу первые 2000 символов JS и HTML:", file=sys.stderr)
+        print("--- JS (первые 2000 символов) ---", file=sys.stderr)
+        print(js_text[:2000], file=sys.stderr)
+        print("--- HTML (первые 2000 символов) ---", file=sys.stderr)
+        print(html_text[:2000], file=sys.stderr)
+        print("--- Конец отладки ---", file=sys.stderr)
+    else:
+        print(f"Параметры: trackingKey={params['tracking_key']}, clientIp={params['client_ip']}, uuid={params['uuid']}, password={'***' if params['password'] else 'None'}")
 
     if not params["tracking_key"] or not params["client_ip"]:
-        # Попытка извлечь из атрибутов тегов или window.*
-        print("Не удалось извлечь через regex, пробую альтернативные методы...", file=sys.stderr)
-        # Возможно, они в объекте window. Попробуем поискать в HTML-комментариях или data-атрибутах
-        # Но скорее всего страница требует JavaScript-рендеринг. В GitHub Actions нет браузера.
+        print("Ошибка: не удалось извлечь trackingKey или clientIp", file=sys.stderr)
         return None
 
-    # 3. Генерируем uuid, если нет
+    # 3. Если нет uuid — генерируем случайный
     uuid_val = params["uuid"] or str(_uuid.uuid4())
     password = params["password"]
     if not password:
         print("Ошибка: не удалось извлечь ключ cp", file=sys.stderr)
         return None
 
-    # 4. AJAX-запрос
+    # 4. AJAX-запрос к API за зашифрованными данными
     payload = {
         "code": tracking_code,
         "selectedService": "",
