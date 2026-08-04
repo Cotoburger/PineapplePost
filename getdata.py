@@ -2,6 +2,8 @@
 """
 Модуль для получения и расшифровки данных отслеживания track24.ru.
 Обходит Cloudflare с помощью извлечения cf_token и установки cookie.
+Перед чтением кэша делает запрос type=update, чтобы принудительно
+обновить данные у перевозчика (аналог нажатия кнопки "Проверить" на сайте).
 """
 
 import sys
@@ -10,6 +12,7 @@ import os
 import json
 import base64
 import hashlib
+import time
 import uuid as _uuid
 from urllib.parse import urljoin
 from typing import Dict, Optional
@@ -22,6 +25,8 @@ from Crypto.Util.Padding import unpad
 DEBUG = os.environ.get("DEBUG", "false").lower() == "true"
 BASE_URL = "https://track24.ru"
 AJAX_PATH = "/ajax/c9bad3a632982e4e315b3ef3d6567e23.ajax.php"
+# Пауза после запроса на обновление, пока сервер track24 опрашивает перевозчика
+UPDATE_WAIT_SECONDS = float(os.environ.get("UPDATE_WAIT_SECONDS", "3"))
 
 
 def evp_kdf(passphrase: str, salt: bytes, key_size=32, iv_size=16) -> tuple:
@@ -98,21 +103,16 @@ def _bypass_cloudflare(session) -> None:
     Пытаемся обойти Cloudflare, подставив cf_token.
     Если страница содержит cf_token, извлекаем его, ставим куку и перезагружаем.
     """
-    # Делаем первый запрос к главной, чтобы проверить, не заглушка ли это
-    resp = session.get(BASE_URL + "/", params={"code": "123"})  # можно любой код, просто чтобы проверить
+    resp = session.get(BASE_URL + "/", params={"code": "123"})
     text = resp.text
     if 'cf_token=' in text:
-        # Извлекаем токен из скрипта
         match = re.search(r'cf_token=([0-9]+:[a-f0-9]+)', text)
         if match:
             token = match.group(1)
             if DEBUG:
                 print(f"Cloudflare token получен: {token}")
-            # Устанавливаем cookie для домена track24.ru
             session.cookies.set("cf_token", token, domain="track24.ru", path="/")
-            # Можно также установить cf_test=1
             session.cookies.set("cf_test", "1", domain="track24.ru", path="/")
-            # После установки кук делаем ещё один запрос, чтобы убедиться, что пустило
             resp2 = session.get(BASE_URL + "/", params={"code": "123"})
             if DEBUG:
                 print("После установки cookie статус:", resp2.status_code)
@@ -120,7 +120,13 @@ def _bypass_cloudflare(session) -> None:
             print("Не удалось извлечь cf_token из страницы")
 
 
-def fetch_tracking_info(tracking_code: str) -> Optional[Dict]:
+def fetch_tracking_info(tracking_code: str, force_refresh: bool = True) -> Optional[Dict]:
+    """
+    force_refresh=True (по умолчанию): сначала отправляет запрос type=update,
+    который заставляет track24 сходить к перевозчику за свежими данными
+    (это то же самое, что нажать кнопку "Проверить трек" на сайте),
+    затем читает результат через type=cache.
+    """
     session = cloudscraper.create_scraper()
     session.headers.update({
         "User-Agent": (
@@ -130,13 +136,11 @@ def fetch_tracking_info(tracking_code: str) -> Optional[Dict]:
         "Accept-Language": "en-US,en;q=0.9",
     })
 
-    # Пытаемся обойти Cloudflare до основного запроса
     try:
         _bypass_cloudflare(session)
     except Exception as e:
         print(f"Ошибка при обходе Cloudflare: {e}", file=sys.stderr)
 
-    # Основной запрос страницы трекинга
     resp = session.get(BASE_URL + "/", params={"code": tracking_code})
     resp.raise_for_status()
     html_text = resp.text
@@ -144,7 +148,6 @@ def fetch_tracking_info(tracking_code: str) -> Optional[Dict]:
     scripts = soup.find_all("script")
     js_text = "\n".join(script.string for script in scripts if script.string)
 
-    # Сохраняем JS для диагностики
     try:
         with open("page_js_dump.txt", "w", encoding="utf-8") as f:
             f.write(js_text)
@@ -171,19 +174,6 @@ def fetch_tracking_info(tracking_code: str) -> Optional[Dict]:
         print("Ошибка: не удалось извлечь ключ cp", file=sys.stderr)
         return None
 
-    # AJAX-запрос к API за зашифрованными данными
-    payload = {
-        "code": tracking_code,
-        "selectedService": "",
-        "lng": "ru",
-        "sort": "0",
-        "grouped": "false",
-        "type": "cache",
-        "key": params["tracking_key"],
-        "clientIp": params["client_ip"],
-        "uuid": uuid_val,
-    }
-
     ajax_headers = {
         "Accept": "application/json, text/javascript, */*; q=0.01",
         "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
@@ -192,28 +182,55 @@ def fetch_tracking_info(tracking_code: str) -> Optional[Dict]:
         "X-Requested-With": "XMLHttpRequest",
     }
 
-    try:
-        resp = session.post(
-            urljoin(BASE_URL, AJAX_PATH),
-            data=payload,
-            headers=ajax_headers,
-            timeout=30
-        )
-        resp.raise_for_status()
-        encrypted = resp.json()
-    except Exception as e:
-        print(f"Ошибка при запросе к API: {e}", file=sys.stderr)
-        return None
+    def _call(track_type: str) -> Optional[dict]:
+        payload = {
+            "code": tracking_code,
+            "selectedService": "",
+            "lng": "ru",
+            "sort": "0",
+            "grouped": "false",
+            "type": track_type,
+            "key": params["tracking_key"],
+            "clientIp": params["client_ip"],
+            "uuid": uuid_val,
+        }
+        try:
+            r = session.post(
+                urljoin(BASE_URL, AJAX_PATH),
+                data=payload,
+                headers=ajax_headers,
+                timeout=30
+            )
+            r.raise_for_status()
+            enc = r.json()
+        except Exception as e:
+            print(f"Ошибка при запросе к API ({track_type}): {e}", file=sys.stderr)
+            return None
+        if "ct" not in enc:
+            print(f"Ответ ({track_type}) не содержит зашифрованных данных: {enc}", file=sys.stderr)
+            return None
+        try:
+            return decrypt_response(enc, password)
+        except Exception as e:
+            print(f"Ошибка расшифровки ({track_type}): {e}", file=sys.stderr)
+            return None
 
-    if "ct" not in encrypted:
-        print("Ответ не содержит зашифрованных данных", file=sys.stderr)
-        return None
+    if force_refresh:
+        # 1) триггерим реальный опрос перевозчика (аналог кнопки "Проверить трек")
+        update_result = _call("update")
+        if update_result is None and DEBUG:
+            print("Запрос type=update не удался, пробуем всё равно прочитать кэш", file=sys.stderr)
+        # 2) даём серверу время сходить к перевозчику и обновить кэш
+        time.sleep(UPDATE_WAIT_SECONDS)
 
-    try:
-        return decrypt_response(encrypted, password)
-    except Exception as e:
-        print(f"Ошибка расшифровки: {e}", file=sys.stderr)
-        return None
+    # 3) читаем итоговый (уже свежий) результат из кэша
+    result = _call("cache")
+
+    # Если по какой-то причине cache не вернул данные, но update вернул — используем его
+    if result is None and force_refresh and 'update_result' in dir() and update_result is not None:
+        return update_result
+
+    return result
 
 
 if __name__ == "__main__":
