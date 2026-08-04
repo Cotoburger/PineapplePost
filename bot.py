@@ -201,7 +201,7 @@ def format_status(data: dict) -> str:
     d = data["data"]
     track = d["trackCode"]
     delivered = d.get("deliveredStatus") == "1"
-    status = "✅ доставлено" if delivered else "📦 в пути"
+    status = "🏁 прибыло" if delivered else "📦 в пути"
     days_total = d.get("daysInTransit", "?")
 
     events = d.get("events", [])
@@ -230,15 +230,18 @@ def format_status(data: dict) -> str:
     else:
         lines.append("Нет данных")
 
-    if following_events:
-        lines.append("")
-        lines.append("📋 <b>История:</b>")
-        for i, ev in enumerate(following_events, 1):
-            lines.append(_format_event_line(ev, index=i))
-    else:
-        lines.append("")
-        lines.append("📋 <b>История:</b>")
-        lines.append("Нет данных")
+    # История перемещений показывается только пока посылка ещё в пути.
+    # Как только заказ прибыл, лишние детали в сообщении убираются.
+    if not delivered:
+        if following_events:
+            lines.append("")
+            lines.append("📋 <b>История:</b>")
+            for i, ev in enumerate(following_events, 1):
+                lines.append(_format_event_line(ev, index=i))
+        else:
+            lines.append("")
+            lines.append("📋 <b>История:</b>")
+            lines.append("Нет данных")
 
     return "\n".join(lines)
 
