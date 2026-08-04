@@ -197,11 +197,56 @@ def _format_event_line(ev: dict, index: Optional[int] = None) -> str:
         line += " | " + ", ".join(extras)
     return line
 
+# Ключевые слова в тексте события, указывающие на то, что посылка прибыла
+# в пункт выдачи и ждёт получателя (или уже вручена).
+# Используются как резервный признак, если поле deliveredStat не пришло или не распознано.
+_DELIVERED_KEYWORDS = (
+    "вручен",
+    "выдан",
+    "получен",
+    "доставлен",
+    "delivered",
+    "поступил",
+    "заберите",
+    "пункт выдачи",
+    "готов к выдаче",
+    "arrival at delivery office",
+    "awaiting buyer to pick-up",
+    "ready for pickup",
+    "arrived at pickup",
+)
+
+
+def _is_delivered(d: dict, latest_event: Optional[dict]) -> bool:
+    # 1) Пытаемся понять по полю deliveredStat (или его старому названию deliveredStatus)
+    raw = d.get("deliveredStat", d.get("deliveredStatus"))
+    if raw is not None:
+        if isinstance(raw, bool):
+            if raw:
+                return True
+        elif isinstance(raw, (int, float)):
+            if raw == 1:
+                return True
+        elif isinstance(raw, str):
+            if raw.strip().lower() in ("1", "true", "yes", "да"):
+                return True
+
+    # 2) Резервная проверка по тексту последнего события (включая operationType)
+    if latest_event:
+        text = " ".join([
+            str(latest_event.get("operationAttributeTranslated") or ""),
+            str(latest_event.get("operationAttribute") or ""),
+            str(latest_event.get("operationType") or ""),
+        ]).lower()
+        if any(kw in text for kw in _DELIVERED_KEYWORDS):
+            return True
+
+    return False
+
+
 def format_status(data: dict) -> str:
     d = data["data"]
     track = d["trackCode"]
-    delivered = d.get("deliveredStatus") == "1"
-    status = "🏁 прибыло" if delivered else "📦 в пути"
     days_total = d.get("daysInTransit", "?")
 
     events = d.get("events", [])
@@ -216,6 +261,9 @@ def format_status(data: dict) -> str:
 
     latest_event = events_sorted[0] if events_sorted else None
     following_events = events_sorted[1:4] if len(events_sorted) > 1 else []
+
+    delivered = _is_delivered(d, latest_event)
+    status = "🏁 прибыло" if delivered else "📦 в пути"
 
     lines = [
         f"📦 <b>{track}</b>",
