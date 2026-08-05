@@ -1,5 +1,7 @@
 # bot.py
 import os
+import html as html_lib
+from urllib.parse import quote
 import sys
 import json
 import hashlib
@@ -243,30 +245,56 @@ def _is_delivered(d: dict, latest_event: Optional[dict]) -> bool:
 
     return False
 
+def _get_sorted_events(data: dict):
+    """
+    Возвращает события, отсортированные по дате, новые сверху.
+    Если дата не парсится, возвращает исходный список.
+    """
+    events = data.get("data", {}).get("events", [])
+
+    try:
+        return sorted(
+            events,
+            key=lambda e: datetime.strptime(e["operationDateTime"], "%d.%m.%Y %H:%M:%S"),
+            reverse=True,
+        )
+    except Exception:
+        return events
+
+
+def is_delivered(data: dict) -> bool:
+    """
+    Проверяет, прибыла/вручена/готова ли посылка к выдаче.
+    Использует ту же логику, что и format_status.
+    """
+    if not isinstance(data, dict):
+        return False
+
+    d = data.get("data", {}) or {}
+    events_sorted = _get_sorted_events(data)
+    latest_event = events_sorted[0] if events_sorted else None
+
+    return _is_delivered(d, latest_event)
+
 
 def format_status(data: dict) -> str:
     d = data["data"]
     track = d["trackCode"]
     days_total = d.get("daysInTransit", "?")
 
-    events = d.get("events", [])
-    try:
-        events_sorted = sorted(
-            events,
-            key=lambda e: datetime.strptime(e["operationDateTime"], "%d.%m.%Y %H:%M:%S"),
-            reverse=True,
-        )
-    except Exception:
-        events_sorted = events
-
+    events_sorted = _get_sorted_events(data)
     latest_event = events_sorted[0] if events_sorted else None
     following_events = events_sorted[1:4] if len(events_sorted) > 1 else []
 
     delivered = _is_delivered(d, latest_event)
     status = "🏁 прибыло" if delivered else "📦 в пути"
 
+    track_url = f"https://track24.ru/?code={quote(str(track), safe='')}"
+    track_html = html_lib.escape(track)
+    url_html = html_lib.escape(track_url, quote=True)
+
     lines = [
-        f"📦 <b>{track}</b>",
+        f'📦 <a href="{url_html}">{track_html}</a>',
         f"Статус: {status}",
         f"Всего дней в пути: {days_total}",
         "",
@@ -339,13 +367,31 @@ def check_subscriptions(subs: Dict[int, dict]):
     for chat_id, info in list(subs.items()):
         code = info["code"]
         old_hash = info["hash"]
+
         print(f"Проверяю {code} для chat_id={chat_id}...")
+
         data = fetch_tracking_info(code)
+
         if data is None:
-            print(f"   Не удалось получить данные, пропуск.")
+            print("   Не удалось получить данные, пропуск.")
             continue
 
+        delivered = is_delivered(data)
         new_hash = compute_state_hash(data)
+
+        # Если посылка прибыла/вручена — отправляем финальное уведомление
+        # и удаляем трек из подписок.
+        if delivered:
+            try:
+                info_msg = "🏁 <b>Посылка прибыла!</b>\n\n" + format_status(data)
+                send_message(chat_id, info_msg)
+            except Exception as e:
+                print(f"Ошибка отправки уведомления chat_id={chat_id}: {e}")
+
+            subs.pop(chat_id, None)
+            print(f"   Трек {code} удалён из подписок chat_id={chat_id}, так как посылка прибыла.")
+            continue
+
         if new_hash != old_hash:
             try:
                 info_msg = "🔄 <b>Обновление по треку!</b>\n\n" + format_status(data)
