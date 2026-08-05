@@ -341,12 +341,15 @@ def compute_state_hash(data: dict) -> str:
 
 def process_new_message(chat_id: int, code: str, subs: Dict[int, dict]):
     code = code.strip()
+
     if not (5 <= len(code) <= 28):
         send_message(chat_id, "❌ Неверный формат трек-номера (должен быть от 5 до 28 символов).")
         return subs
 
-    send_message(chat_id, f"🔎 Ищу информацию по треку <b>{code}</b>...")
+    send_message(chat_id, f"🔎 Ищу информацию по треку <b>{html_lib.escape(code)}</b>...")
+
     data = fetch_tracking_info(code)
+
     if data is None:
         send_message(chat_id, "⚠️ Не удалось получить данные. Попробуйте позже.")
         return subs
@@ -358,9 +361,16 @@ def process_new_message(chat_id: int, code: str, subs: Dict[int, dict]):
         send_message(chat_id, f"Ошибка при форматировании: {e}")
         return subs
 
+    # Если посылка уже прибыла/вручена, не добавляем её в отслеживание.
+    if is_delivered(data):
+        send_message(chat_id, "ℹ️ Посылка уже прибыла/вручена, поэтому отслеживание не добавлено.")
+        return subs
+
     new_hash = compute_state_hash(data)
     subs[chat_id] = {"code": code, "hash": new_hash}
+
     send_message(chat_id, "✅ Вы подписались на обновления по этому треку. Я буду проверять изменения.")
+
     return subs
 
 def check_subscriptions(subs: Dict[int, dict]):
