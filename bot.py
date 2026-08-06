@@ -322,6 +322,10 @@ def format_status(data: dict) -> str:
     return "\n".join(lines)
 
 def compute_state_hash(data: dict) -> str:
+    """
+    Считает хэш только от текущего статуса (последнего события).
+    Уведомление придёт только когда самое свежее событие изменится.
+    """
     events = data["data"]["events"]
     # Сортируем для стабильного порядка
     try:
@@ -332,11 +336,14 @@ def compute_state_hash(data: dict) -> str:
         )
     except Exception:
         events_sorted = events
-    relevant = {
-        "events": events_sorted,
-        "lastPoint": data["data"]["lastPoint"],
-    }
-    raw = json.dumps(relevant, sort_keys=True, ensure_ascii=False)
+    
+    # Берём только последнее (самое свежее) событие
+    latest_event = events_sorted[0] if events_sorted else None
+    
+    if latest_event is None:
+        return hashlib.sha256(b"").hexdigest()
+    
+    raw = json.dumps(latest_event, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(raw.encode()).hexdigest()
 
 def process_new_message(chat_id: int, code: str, subs: Dict[int, dict]):
