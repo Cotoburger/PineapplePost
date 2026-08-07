@@ -321,30 +321,57 @@ def format_status(data: dict) -> str:
 
     return "\n".join(lines)
 
+def _clean_status_value(value) -> str:
+    """
+    Приводит значение к аккуратной строке без лишних пробелов.
+    Нужно, чтобы случайные изменения пробелов не вызывали уведомления.
+    """
+    return " ".join(str(value or "").split())
+
+
+def _event_status_signature(ev: Optional[dict]) -> str:
+    """
+    Собирает подпись только из ключевых полей последнего события.
+    Дни в пути и вес сюда намеренно не входят.
+    """
+    if not ev:
+        return ""
+
+    dt = _clean_status_value(ev.get("operationDateTime"))
+
+    attr = _clean_status_value(
+        ev.get("operationAttributeTranslated") or ev.get("operationAttribute")
+    )
+
+    place = _clean_status_value(
+        ev.get("operationPlaceNameTranslated") or ev.get("operationPlaceName")
+    )
+
+    postal = _clean_status_value(ev.get("operationPlacePostalCode"))
+    service = _clean_status_value(ev.get("serviceName"))
+
+    return "|".join([dt, attr, place, postal, service])
+
+
 def compute_state_hash(data: dict) -> str:
     """
-    Считает хэш только от текущего статуса (последнего события).
-    Уведомление придёт только когда самое свежее событие изменится.
+    Считает хэш только от текущего статуса.
+
+    Учитываются только смысловые поля последнего события:
+    - дата события;
+    - статус;
+    - место;
+    - почтовый индекс;
+    - служба доставки.
+
+    Поля daysInTransit и itemWeight игнорируются.
     """
-    events = data["data"]["events"]
-    # Сортируем для стабильного порядка
-    try:
-        events_sorted = sorted(
-            events,
-            key=lambda e: datetime.strptime(e["operationDateTime"], "%d.%m.%Y %H:%M:%S"),
-            reverse=True,
-        )
-    except Exception:
-        events_sorted = events
-    
-    # Берём только последнее (самое свежее) событие
+    events_sorted = _get_sorted_events(data)
     latest_event = events_sorted[0] if events_sorted else None
-    
-    if latest_event is None:
-        return hashlib.sha256(b"").hexdigest()
-    
-    raw = json.dumps(latest_event, sort_keys=True, ensure_ascii=False)
-    return hashlib.sha256(raw.encode()).hexdigest()
+
+    signature = _event_status_signature(latest_event)
+
+    return hashlib.sha256(signature.encode("utf-8")).hexdigest()
 
 def process_new_message(chat_id: int, code: str, subs: Dict[int, dict]):
     code = code.strip()
