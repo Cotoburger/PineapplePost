@@ -24,7 +24,7 @@ from Crypto.Util.Padding import unpad
 
 DEBUG = os.environ.get("DEBUG", "false").lower() == "true"
 BASE_URL = "https://track24.ru"
-AJAX_PATH = "/ajax/c9bad3a632982e4e315b3ef3d6567e23.ajax.php"
+AJAX_PATH = "/ajax/866a72be0429742eb409de5133506247.ajax.php"
 # Пауза после запроса на обновление, пока сервер track24 опрашивает перевозчика
 UPDATE_WAIT_SECONDS = float(os.environ.get("UPDATE_WAIT_SECONDS", "3"))
 
