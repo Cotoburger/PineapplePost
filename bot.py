@@ -1,6 +1,8 @@
 # bot.py
 import os
 import html as html_lib
+import re
+import unicodedata
 from urllib.parse import quote
 import sys
 import json
@@ -321,12 +323,31 @@ def format_status(data: dict) -> str:
 
     return "\n".join(lines)
 
+
+# Невидимые/особые пробельные юникод-символы, которые track24 иногда
+# подмешивает в текст (zero-width space, BOM, неразрывный пробел и т.п.).
+# Раньше именно из-за них случались ложные "изменения" статуса.
+_INVISIBLE_CHARS_RE = re.compile(
+    "[\u200b\u200c\u200d\u200e\u200f\ufeff\u2060\u00ad]"
+)
+
+
 def _clean_status_value(value) -> str:
     """
-    Приводит значение к аккуратной строке без лишних пробелов.
-    Нужно, чтобы случайные изменения пробелов не вызывали уведомления.
+    Приводит значение к аккуратной, канонической строке:
+    - убирает невидимые юникод-символы (zero-width space, BOM и т.д.);
+    - нормализует юникод (NFKC), чтобы визуально одинаковые, но
+      по-разному закодированные символы не считались разными;
+    - схлопывает любые пробельные символы (включая неразрывный
+      пробел \\u00a0) к обычному пробелу и обрезает лишние пробелы.
+
+    Нужно, чтобы случайные "технические" различия в тексте от track24
+    не вызывали ложные уведомления об изменении статуса.
     """
-    return " ".join(str(value or "").split())
+    text = str(value or "")
+    text = unicodedata.normalize("NFKC", text)
+    text = _INVISIBLE_CHARS_RE.sub("", text)
+    return " ".join(text.split())
 
 
 def _event_status_signature(ev: Optional[dict]) -> str:
@@ -364,7 +385,9 @@ def compute_state_hash(data: dict) -> str:
     - почтовый индекс;
     - служба доставки.
 
-    Поля daysInTransit и itemWeight игнорируются.
+    Поля daysInTransit и itemWeight игнорируются, а текст перед
+    хэшированием нормализуется (_clean_status_value), чтобы невидимые
+    символы или варианты пробелов не создавали ложных изменений.
     """
     events_sorted = _get_sorted_events(data)
     latest_event = events_sorted[0] if events_sorted else None
