@@ -2,7 +2,7 @@ name: TrackBot
 
 on:
   schedule:
-    - cron: "*/20 * * * *"
+    - cron: "*/35 * * * *"    
   workflow_dispatch:
 
 permissions:
