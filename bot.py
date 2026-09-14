@@ -77,6 +77,9 @@ def decrypt_subscriptions(encrypted_b64: str) -> Optional[dict]:
 
 import traceback
 
+from storage import atomic_write_text
+
+
 def load_subscriptions() -> Dict[int, dict]:
     try:
         with open(SUBSCRIPTIONS_FILE, "r", encoding="utf-8") as f:
@@ -132,8 +135,7 @@ def save_subscriptions(subs: Dict[int, dict]):
         content = encrypt_subscriptions(data_to_save)
     else:
         content = json.dumps(data_to_save, ensure_ascii=False, indent=2)
-    with open(SUBSCRIPTIONS_FILE, "w", encoding="utf-8") as f:
-        f.write(content)
+    atomic_write_text(SUBSCRIPTIONS_FILE, content)
 
 # ── Смещение последнего обработанного обновления ─────────
 def get_last_update_id() -> int:
@@ -144,8 +146,7 @@ def get_last_update_id() -> int:
         return 0
 
 def set_last_update_id(update_id: int):
-    with open(OFFSET_FILE, "w") as f:
-        f.write(str(update_id))
+    atomic_write_text(OFFSET_FILE, str(update_id))
 
 # ── Telegram API ─────────────────────────────────────────
 def send_message(chat_id: int, text: str, parse_mode="HTML", disable_notification=False):
