@@ -27,6 +27,26 @@ BASE_URL = "https://track24.ru"
 AJAX_PATH = "/ajax/866a72be0429742eb409de5133506247.ajax.php"
 # Пауза после запроса на обновление, пока сервер track24 опрашивает перевозчика
 UPDATE_WAIT_SECONDS = float(os.environ.get("UPDATE_WAIT_SECONDS", "3"))
+REQUEST_RETRIES = int(os.environ.get("TRACK24_REQUEST_RETRIES", "2"))
+
+
+def _request_with_retry(session, method: str, url: str, *, max_retries: int = None, **kwargs):
+    """Perform a network request with short exponential backoff and clear failures."""
+    retries = REQUEST_RETRIES if max_retries is None else max_retries
+    last_error = None
+
+    for attempt in range(retries + 1):
+        try:
+            response = getattr(session, method)(url, **kwargs)
+            response.raise_for_status()
+            return response
+        except Exception as exc:  # pragma: no cover - network error branch
+            last_error = exc
+            if attempt >= retries:
+                break
+            time.sleep(min(2 ** attempt, 8))
+
+    raise last_error
 
 
 def evp_kdf(passphrase: str, salt: bytes, key_size=32, iv_size=16) -> tuple:
@@ -103,7 +123,7 @@ def _bypass_cloudflare(session) -> None:
     Пытаемся обойти Cloudflare, подставив cf_token.
     Если страница содержит cf_token, извлекаем его, ставим куку и перезагружаем.
     """
-    resp = session.get(BASE_URL + "/", params={"code": "123"})
+    resp = _request_with_retry(session, "get", BASE_URL + "/", params={"code": "123"}, timeout=20)
     text = resp.text
     if 'cf_token=' in text:
         match = re.search(r'cf_token=([0-9]+:[a-f0-9]+)', text)
@@ -113,7 +133,7 @@ def _bypass_cloudflare(session) -> None:
                 print(f"Cloudflare token получен: {token}")
             session.cookies.set("cf_token", token, domain="track24.ru", path="/")
             session.cookies.set("cf_test", "1", domain="track24.ru", path="/")
-            resp2 = session.get(BASE_URL + "/", params={"code": "123"})
+            resp2 = _request_with_retry(session, "get", BASE_URL + "/", params={"code": "123"}, timeout=20)
             if DEBUG:
                 print("После установки cookie статус:", resp2.status_code)
         else:
@@ -141,8 +161,7 @@ def fetch_tracking_info(tracking_code: str, force_refresh: bool = True) -> Optio
     except Exception as e:
         print(f"Ошибка при обходе Cloudflare: {e}", file=sys.stderr)
 
-    resp = session.get(BASE_URL + "/", params={"code": tracking_code})
-    resp.raise_for_status()
+    resp = _request_with_retry(session, "get", BASE_URL + "/", params={"code": tracking_code}, timeout=30)
     html_text = resp.text
     soup = BeautifulSoup(html_text, "html.parser")
     scripts = soup.find_all("script")
@@ -195,13 +214,14 @@ def fetch_tracking_info(tracking_code: str, force_refresh: bool = True) -> Optio
             "uuid": uuid_val,
         }
         try:
-            r = session.post(
+            r = _request_with_retry(
+                session,
+                "post",
                 urljoin(BASE_URL, AJAX_PATH),
                 data=payload,
                 headers=ajax_headers,
-                timeout=30
+                timeout=30,
             )
-            r.raise_for_status()
             enc = r.json()
         except Exception as e:
             print(f"Ошибка при запросе к API ({track_type}): {e}", file=sys.stderr)
